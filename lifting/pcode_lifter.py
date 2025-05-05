@@ -27,7 +27,7 @@ from tqdm import tqdm
 
 ACFG_POSTFIX = "_acfg_disasm.json"
 CFG_SUMMARY_POSTFIX = "_cfg_summary.json"
-GSAT_BIN_PATH = "bin/gsat-1.0.jar"
+GSAT_BIN_PATH = "bin/gsat-1.1.jar"
 ROOT_PATH = "."
 NPROC = 1
 

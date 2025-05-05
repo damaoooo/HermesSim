@@ -1,0 +1,16 @@
+{
+    "common": {
+        "args": {
+            "dataset": "Dataset-1",
+            "test_outdir": "last",
+            "featuresdir": "inputs/pcode/pcode_sog",
+            "feature_json_name": "graph_func_dict_opc_True.json"
+        }
+    },
+    "sog_0": {
+        "is_testing": true,
+        "args": {
+            "outputdir": "outputs/Output-0505_021324/Output-sog-pcode_sog-0505_021324"
+        }
+    }
+}

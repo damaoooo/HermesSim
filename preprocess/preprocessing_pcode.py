@@ -19,6 +19,10 @@ import networkx as nx
 import numpy as np
 import os
 import pickle
+import copy
+
+from typing import Dict
+import multiprocessing
 
 from collections import Counter
 from collections import defaultdict
@@ -130,6 +134,245 @@ def process_nverb(gtype, nverb: list, arch):
         assert "Unkown Graph Type"
 
 
+def token_mapping_map(input_folder, f_json, not_cached_graph_types, any_cached, result_queue: multiprocessing.Queue):
+
+    num_func = 0
+    opc_counters, opc_occurs = {}, {}
+    for gtype in GRAPH_TYPES:
+        opc_counters[gtype], opc_occurs[gtype] = (dict([
+            ('opc', Counter()),
+            ('val', Counter()),
+            *[(f'{arch}_reg', Counter()) for arch in ['mips', 'arm', 'x']],
+        ]) for _ in range(2))
+
+    json_path = os.path.join(input_folder, f_json)
+    with open(json_path) as f_in:
+        jj = json.load(f_in)
+
+    arch = f_json.split('-')[0][:-2]
+    idb_path = list(jj.keys())[0]
+    j_data = jj[idb_path]
+    for key in ['arch']:
+        if key in j_data:
+            del j_data[key]
+
+    # Iterate over each function
+    for fva in j_data:
+        for gtype in not_cached_graph_types:
+            opc_sets = defaultdict(set)
+            fva_data = j_data[fva][gtype]
+            # Iterate over each basic-block
+            for bb in fva_data['nverbs']:
+                nverb = fva_data['nverbs'][bb]
+                for ty, opc in process_nverb(gtype, nverb, arch):
+                    opc_counters[gtype][ty].update([opc])
+                    opc_sets[ty].add(opc)
+            for ty, opc_set in opc_sets.items():
+                opc_occurs[gtype][ty].update(opc_set)
+    if not any_cached:
+        num_func += len(j_data)
+
+    # make the counters into dict
+    for gtype in not_cached_graph_types:
+        opc_counters[gtype]['opc'] = dict(opc_counters[gtype]['opc'])
+        opc_counters[gtype]['val'] = dict(opc_counters[gtype]['val'])
+        for arch in ['mips', 'arm', 'x']:
+            opc_counters[gtype][f'{arch}_reg'] = dict(opc_counters[gtype][f'{arch}_reg'])
+
+    for gtype in not_cached_graph_types:
+        opc_occurs[gtype]['opc'] = dict(opc_occurs[gtype]['opc'])
+        opc_occurs[gtype]['val'] = dict(opc_occurs[gtype]['val'])
+        for arch in ['mips', 'arm', 'x']:
+            opc_occurs[gtype][f'{arch}_reg'] = dict(opc_occurs[gtype][f'{arch}_reg'])
+
+    result = {"num_func": num_func, "opc_counters": opc_counters, "opc_occurs": opc_occurs}
+    result_queue.put(result)
+
+
+def fast_nested_merge(dst: Dict[str, Dict[str, Dict[str, int]]], 
+                               src: Dict[str, Dict[str, Dict[str, int]]]):
+    """
+    High performance nested dict merge for 3 levels: 
+    dst[k1][k2][k3] += src[k1][k2][k3]
+
+    Requirements:
+      - dst and src are dict[str -> dict[str -> dict[str -> int]]] 
+      - dst will be modified in place
+    """
+    for key1, dict1 in src.items():
+        if key1 not in dst:
+            # If first level key doesn't exist, need to deep copy this part of src
+            # To avoid accidentally modifying src when modifying dst (if src is used elsewhere)
+            # Or if we're sure src won't be modified and want extreme performance, 
+            # could consider shallow copy or creating layer by layer
+            # But deep copy is the safest way to avoid side effects
+            dst[key1] = copy.deepcopy(dict1)
+        else:
+            dst_dict1 = dst[key1] # Get corresponding first level dict from dst
+            for key2, dict2 in dict1.items():
+                if key2 not in dst_dict1:
+                    # If second level key doesn't exist, also need deep copy
+                    # (even though next level is int, structurally copying second level dict)
+                    # For safety, still use deepcopy
+                    dst_dict1[key2] = copy.deepcopy(dict2)
+                    # Or if we're sure dict2 only contains ints, shallow copy works too:
+                    # dst_dict1[key2] = dict2.copy()
+                else:
+                    dst_dict2 = dst_dict1[key2] # Get corresponding second level dict from dst
+                    for key3, val in dict2.items():
+                        # Perform addition merge at innermost level
+                        dst_dict2[key3] = dst_dict2.get(key3, 0) + val
+                        
+    return dst # Return the modified dst
+
+
+def token_mapping_map_reduce(result_queue: multiprocessing.Queue, output_queue: multiprocessing.Queue):
+    
+    total_num_func = 0
+    total_opc_counters = {}
+    total_opc_occurs = {}
+    for gtype in GRAPH_TYPES:
+        total_opc_counters[gtype] = {"opc": {}, "val": {}}
+        for arch in ['mips', 'arm', 'x']:
+            total_opc_counters[gtype][f'{arch}_reg'] = {}
+        total_opc_occurs[gtype] = {"opc": {}, "val": {}}
+        for arch in ['mips', 'arm', 'x']:
+            total_opc_occurs[gtype][f'{arch}_reg'] = {}
+    
+    while True:
+        result = result_queue.get()
+        if isinstance(result, str) and result == "STOP":
+            break
+
+        num_func = result["num_func"]
+        opc_counters = result["opc_counters"]
+        opc_occurs = result["opc_occurs"]
+
+        total_num_func += num_func
+
+
+        total_opc_counters = fast_nested_merge(dst=total_opc_counters, src=opc_counters)
+        total_opc_occurs = fast_nested_merge(dst=total_opc_occurs, src=opc_occurs)
+
+        # return the merged result
+    output_queue.put({"num_func": total_num_func, "opc_counters": total_opc_counters, "opc_occurs": total_opc_occurs})
+            
+
+def token_mapping_parallel(input_folder, output_dir, freq_mode=True):
+    print("[i] Freq_mode: ", freq_mode)
+    idmaps, opc_counters, opc_occurs = {}, {}, {}
+    cached = {}
+    num_func = 0
+
+    # Try loading caches
+    for gtype in GRAPH_TYPES:
+        sub_dir = get_sub_dir(output_dir, gtype)
+        counter_path = os.path.join(sub_dir, "opc_counter.json")
+        occurs_path = os.path.join(sub_dir, "opc_occurs.json")
+        if os.path.exists(counter_path) and os.path.exists(occurs_path):
+            with open(counter_path, "r") as f:
+                opc_counters[gtype] = json.load(f)
+            with open(occurs_path, "r") as f:
+                opc_occurs[gtype] = json.load(f)
+                num_func = opc_occurs[gtype]["num_funcs"]
+            cached[gtype] = True
+        else:
+            cached[gtype] = False
+
+    opc_counters: Dict[str, Dict[str, Counter]]
+    opc_occurs: Dict[str, Dict[str, Counter]]
+
+    any_cached = sum(cached[gtype] for gtype in GRAPH_TYPES) != 0
+    not_cached_graph_types = list(g for g in GRAPH_TYPES if not cached[g])
+
+    if len(not_cached_graph_types) != 0:
+        # Collect opc stats info
+        manager = multiprocessing.Manager()
+        result_queue = manager.Queue(maxsize=100)
+        output_queue = manager.Queue(maxsize=100)
+
+        pool = multiprocessing.Pool(processes=multiprocessing.cpu_count())
+        reducer = multiprocessing.Process(target=token_mapping_map_reduce, args=(result_queue, output_queue))
+        reducer.start()
+        bar = tqdm(total=len(os.listdir(input_folder)), desc="Token Mapping", dynamic_ncols=True)
+
+        for f_json in os.listdir(input_folder):
+            if not f_json.endswith(".json"):
+                bar.update(1)
+                continue
+
+            pool.apply_async(token_mapping_map, args=(input_folder, f_json, not_cached_graph_types, any_cached, result_queue), callback=lambda _: bar.update(1))
+        
+        pool.close()
+        pool.join()
+
+        result_queue.put("STOP")
+        reducer.join()
+        bar.close()
+
+        result = output_queue.get()
+        num_func = result["num_func"]
+        opc_counters = result["opc_counters"]
+        opc_occurs = result["opc_occurs"]
+
+        # Convert those dict back to Counter
+
+        for gtype in not_cached_graph_types:
+            for keys in opc_counters[gtype]:
+                opc_counters[gtype][keys] = Counter(opc_counters[gtype][keys])
+            for keys in opc_occurs[gtype]:
+                opc_occurs[gtype][keys] = Counter(opc_occurs[gtype][keys])
+
+        # Cache results
+        for gtype in not_cached_graph_types:
+            sub_dir = get_sub_dir(output_dir, gtype)
+            output_path = os.path.join(sub_dir, "opc_counter.json")
+            with open(output_path, "w") as f:
+                json.dump(opc_counters[gtype], f)
+            output_path = os.path.join(sub_dir, "opc_occurs.json")
+            opc_occurs[gtype]["num_funcs"] = num_func
+            with open(output_path, "w") as f:
+                json.dump(opc_occurs[gtype], f)
+
+                
+    # Assigning each word an ID
+    print(f"num funcs: {num_func}")
+    for gtype in GRAPH_TYPES:
+        idmaps[gtype] = {'padding': 0} if gtype in ['ISCG', 'ACFG'] else {}
+    for gtype, opc_cnts in opc_counters.items():
+        print(f"[D] Processing {gtype}. ")
+        ths = dict([
+            ('opc', 55 if gtype != 'ACFG' else 50), 
+            ('val', 0.01),    
+            *[(f'{arch}_reg', 0.01) for arch in ['mips', 'arm', 'x']],
+        ]) # thresholds
+        for ty, opc_cnt in opc_cnts.items():
+            if ty.endswith("_occur"):
+                continue
+            if not isinstance(opc_cnt, dict):
+                opc_cnt = [(k,v) for k,v in opc_cnt.most_common()]
+            else:
+                opc_cnt = sorted(list(opc_cnt.items()), key=lambda k:k[1], reverse=True)
+            mapped_cnt = 0
+            tot_cnt = sum([v for _, v in opc_cnt])
+            idmaps[gtype][ty] = len(idmaps[gtype])
+            start_id = len(idmaps[gtype])
+            for i, (k, v) in enumerate(opc_cnt):
+                idmaps[gtype][k] = i + start_id
+                mapped_cnt += v
+                if isinstance(ths[ty], float):
+                    if not freq_mode and mapped_cnt / tot_cnt > ths[ty]:
+                        break
+                    elif freq_mode and v / num_func < ths[ty]:
+                        break
+                elif isinstance(ths[ty], int) and i + 1 >= ths[ty]:
+                    break
+            print("[D] Found: {} mnemonics.".format(len(opc_cnt)))
+            print("[D] Num of mnemonics mapped: {}".format(len(idmaps[gtype])-start_id))
+        print("[D] Tot Num of mnemonics mapped: {}".format(len(idmaps[gtype])))
+    return idmaps
+
+
 def token_mapping(input_folder, output_dir, freq_mode=True):
     print("[i] Freq_mode: ", freq_mode)
     idmaps, opc_counters, opc_occurs = {}, {}, {}
@@ -156,12 +399,15 @@ def token_mapping(input_folder, output_dir, freq_mode=True):
             ]) for _ in range(2))
             cached[gtype] = False
 
+    opc_counters: Dict[str, Dict[str, Counter]]
+    opc_occurs: Dict[str, Dict[str, Counter]]
+
     any_cached = sum(cached[gtype] for gtype in GRAPH_TYPES) != 0
     not_cached_graph_types = list(g for g in GRAPH_TYPES if not cached[g])
 
     if len(not_cached_graph_types) != 0:
         # Collect opc stats info
-        for f_json in tqdm(os.listdir(input_folder)):
+        for f_json in tqdm(os.listdir(input_folder), desc="Token Mapping"):
             if not f_json.endswith(".json"):
                 continue
 
@@ -371,6 +617,61 @@ def process_one_file(args):
                 }
     return idb_path, str_func_dict, pkl_func_dict
 
+def create_functions_dict_map(arg, output_queue: multiprocessing.Queue):
+    result = process_one_file(arg)
+    output_queue.put(result)
+
+def create_functions_dict_reduce(dump_str, dump_pkl, output_queue: multiprocessing.Queue, result_queue: multiprocessing.Queue):
+    str_func_dict = {g:defaultdict(dict) for g in GRAPH_TYPES} if dump_str else {}
+    pkl_func_dict = {g:defaultdict(dict) for g in GRAPH_TYPES} if dump_pkl else {}
+
+    while True:
+        result = output_queue.get()
+        if isinstance(result, str) and result == "STOP":
+            break
+        idb_path, str_func_one, pkl_func_one = result
+        if dump_str:
+            for gtype, data in str_func_one.items():
+                str_func_dict[gtype][idb_path] = data
+        if dump_pkl:
+            for gtype, data in pkl_func_one.items():
+                pkl_func_dict[gtype][idb_path] = data
+
+    result_queue.put((str_func_dict, pkl_func_dict))
+
+def create_functions_dict_parallel(input_folder, opc_dicts, dump_str, dump_pkl):
+    str_func_dict = {g:defaultdict(dict) for g in GRAPH_TYPES} if dump_str else {}
+    pkl_func_dict = {g:defaultdict(dict) for g in GRAPH_TYPES} if dump_pkl else {}
+    args = []
+    for f_json in os.listdir(input_folder):
+        if not f_json.endswith(".json"):
+            continue
+        json_path = os.path.join(input_folder, f_json)
+        args.append((json_path, opc_dicts, dump_str, dump_pkl))
+
+    manager = multiprocessing.Manager()
+    output_queue = manager.Queue(maxsize=100)
+    result_queue = manager.Queue(maxsize=100)
+
+    bar = tqdm(total=len(args), desc="create functions dict", dynamic_ncols=True)
+    pool = multiprocessing.Pool(processes=multiprocessing.cpu_count() - 1)
+    reducer = multiprocessing.Process(target=create_functions_dict_reduce, args=(dump_str, dump_pkl, output_queue, result_queue))
+    reducer.start()
+
+    for arg in args:
+        p = pool.apply_async(create_functions_dict_map, args=(arg, output_queue), callback=lambda _: bar.update(1))
+
+    pool.close()
+    pool.join()
+    output_queue.put("STOP")
+    print("[D] Waiting for all processes to finish...")
+    reducer.join()
+
+    bar.close()
+    str_func_dict, pkl_func_dict = result_queue.get()
+    print("[D] All processes finished.")
+    return str_func_dict, pkl_func_dict
+
 
 def create_functions_dict(input_folder, opc_dicts, dump_str, dump_pkl):
     """
@@ -392,7 +693,7 @@ def create_functions_dict(input_folder, opc_dicts, dump_str, dump_pkl):
         json_path = os.path.join(input_folder, f_json)
         args.append((json_path, opc_dicts, dump_str, dump_pkl))
     for idb_path, str_func_one, pkl_func_one in \
-        tqdm(map(process_one_file, args), total=len(args)):
+        tqdm(map(process_one_file, args), total=len(args), desc="create functions dict"):
         if dump_str:
             for gtype, data in str_func_one.items():
                 str_func_dict[gtype][idb_path] = data
@@ -435,7 +736,7 @@ def main(input_dir, training, freq_mode, opcodes_json, output_dir, dataset, out_
 
     if training:
         # Conduct token mapping and save results. 
-        opc_dicts = token_mapping(
+        opc_dicts = token_mapping_parallel(
             input_dir, output_dir, freq_mode)
         for gtype in GRAPH_TYPES:
             sub_dir = get_sub_dir(output_dir, gtype)
@@ -458,7 +759,8 @@ def main(input_dir, training, freq_mode, opcodes_json, output_dir, dataset, out_
     # Two 
     dump_str = out_format == "json" or out_format == "both"
     dump_pkl = out_format == "pkl" or out_format == "both"
-    str_dict, pkl_dict = create_functions_dict(
+
+    str_dict, pkl_dict = create_functions_dict_parallel(
         input_dir, opc_dicts, dump_str, dump_pkl)
     for gtype, g_str_dict in str_dict.items():
         o_json = "graph_func_dict_opc_{}.json".format(freq_mode)

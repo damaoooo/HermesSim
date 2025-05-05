@@ -17,6 +17,8 @@ import argparse
 import json
 import pandas
 from os.path import join, basename
+import multiprocessing
+import os
 from tqdm import tqdm
 
 
@@ -43,6 +45,19 @@ def get_func_info(row):
     }
 
 
+def process_info(idb_path, cfgs_folder, summary_folder, finfos):
+    bin_name = get_bin_name(idb_path)
+    acfg_feats = get_acfg_features_json(cfgs_folder, bin_name)[idb_path]
+    for finfo in finfos:
+        fva = finfo["start_ea"]
+        finfo["edges"] = acfg_feats[fva]["edges"]
+        for bb_va, bb_feats in acfg_feats[fva]["basic_blocks"].items():
+            bb_va_hex = hex(int(bb_va))
+            finfo["nodes"].append([bb_va_hex, bb_feats["bb_len"]])
+    summary_fn = join(summary_folder, bin_name + "_cfg_summary.json")
+    with open(summary_fn, "w") as f:
+        json.dump({idb_path: finfos}, f)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog='Dataset summary files generator',
@@ -63,9 +78,12 @@ if __name__ == "__main__":
     summary_folder, ds_info_csv, cfgs_folder = (getattr(
         args, arg) for arg in ['cfg_summary', 'dataset_info_csv', 'cfgs_folder'])
 
+    if not os.path.exists(summary_folder):
+        os.makedirs(summary_folder)
+
     summary = {}
     df = pandas.read_csv(ds_info_csv)
-    for idx, row in tqdm(df.iterrows(), total=df.size):
+    for idx, row in tqdm(df.iterrows(), total=len(df), dynamic_ncols=True):
         idb_path = row['idb_path']
         finfo = get_func_info(row)
         if summary.get(idb_path, None) is None:
@@ -73,16 +91,14 @@ if __name__ == "__main__":
         else:
             summary[idb_path].append(finfo)
 
-    for idb_path, finfos in tqdm(summary.items()):
-        bin_name = get_bin_name(idb_path)
-        acfg_feats = get_acfg_features_json(cfgs_folder, bin_name)[idb_path]
-        for finfo in finfos:
-            fva = finfo["start_ea"]
-            finfo["edges"] = acfg_feats[fva]["edges"]
-            for bb_va, bb_feats in acfg_feats[fva]["basic_blocks"].items():
-                bb_va_hex = hex(int(bb_va))
-                finfo["nodes"].append([bb_va_hex, bb_feats["bb_len"]])
-        summary_fn = join(summary_folder, bin_name + "_cfg_summary.json")
-        with open(summary_fn, "w") as f:
-            json.dump({idb_path: finfos}, f)
-        summary[idb_path] = None
+    bar = tqdm(total=len(summary), dynamic_ncols=True)
+    bar.set_description("Processing dataset summary")
+
+    pool = multiprocessing.Pool(processes=os.cpu_count())
+
+    for idb_path, finfos in summary.items():
+        pool.apply_async(process_info, args=(idb_path, cfgs_folder, summary_folder, finfos), callback=lambda _: bar.update(1))
+    pool.close()
+    pool.join()
+    bar.close()
+        # summary[idb_path] = None

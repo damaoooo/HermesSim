@@ -97,7 +97,7 @@ class GraphFactoryBase(object):
         self._edge_feature_dim = edge_feature_dim
 
     def _filter_edges(self):
-        POOL_SIZE = 12
+        POOL_SIZE = 32
         log.info(f"Filter Edges with pool size {POOL_SIZE}")
         with Pool(POOL_SIZE) as p:
             args = [(idb, idb_data, self._used_subgraphs)
@@ -152,7 +152,7 @@ class GraphFactoryBase(object):
         node_features = torch.tensor(node_features)
         edge_feat = torch.tensor(attr, dtype=torch.int)
         graph_idx = torch.tensor(graph_idx, dtype=torch.long)
-        edge_index = torch.tensor([from_idx, to_idx], dtype=torch.long)
+        edge_index = torch.tensor(np.array([from_idx, to_idx]), dtype=torch.long)
         return node_features, edge_index, edge_feat, graph_idx, batch_size
 
     def _triplets(self):

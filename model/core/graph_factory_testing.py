@@ -61,8 +61,8 @@ class GraphFactoryTesting(GraphFactoryBase):
         # Every iter process two pairs
         for idx in tqdm(range(numIter), total=numIter):
             finfo = next(iterator_f)[1]
-
-            f = self._fdict[finfo['idb']][finfo['fva']]
+            idb_key = 'idb' if 'idb' in finfo.keys() else 'idb_path'
+            f = self._fdict[finfo[idb_key]][finfo['fva']]
 
             batch_graphs.append(f['graph'])
             batch_features.append(f[self._features_type])

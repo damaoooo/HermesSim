@@ -671,7 +671,7 @@ class GNNModel:
         infer_tasks = self._config['testing'].get('infer_tasks', [])
         for infer_inp in infer_tasks:
             output_name = None
-            if isinstance(infer_inp, tuple):
+            if isinstance(infer_inp, tuple) or isinstance(infer_inp, list):
                 output_name = basename(infer_inp[1])
                 infer_inp = infer_inp[0]
             else:
