@@ -6,4 +6,4 @@
 __pycache__
 __cache__
 .vscode
-./bin/gsat-1.1.jar
+/bin/gsat-1.1.jar
