@@ -6,8 +6,8 @@ python lifting/pcode_lifter.py \
     --verbose 1 \
     --nproc 32 \
     --load_mode binary \
-    --binary_language_id x86:LE:64:default \
-    --binary_base_addr 0
+    --binary_language_id auto \
+    --binary_base_addr auto
 
 echo "building validation_Dataset-1"
 python lifting/pcode_lifter.py \
@@ -17,8 +17,8 @@ python lifting/pcode_lifter.py \
     --verbose 1 \
     --nproc 32 \
     --load_mode binary \
-    --binary_language_id x86:LE:64:default \
-    --binary_base_addr 0
+    --binary_language_id auto \
+    --binary_base_addr auto
 
 echo "building testing_Dataset-1"
 python lifting/pcode_lifter.py \
@@ -28,5 +28,5 @@ python lifting/pcode_lifter.py \
     --verbose 1 \
     --nproc 32 \
     --load_mode binary \
-    --binary_language_id x86:LE:64:default \
-    --binary_base_addr 0
+    --binary_language_id auto \
+    --binary_base_addr auto

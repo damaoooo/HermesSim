@@ -19,6 +19,7 @@ import sys
 import os
 import subprocess
 import json
+import struct
 import traceback
 import pandas as pd
 from os.path import basename, join
@@ -37,6 +38,38 @@ AR_OBJ_MAP = {
     ## Dataset-2
     "libmicrohttpd.a": "libmicrohttpd_la-connection.o",
     "libtomcrypt.a": "aes.o",
+}
+
+ELF_MAGIC = b"\x7fELF"
+ELFCLASS32 = 1
+ELFCLASS64 = 2
+ELFDATA2LSB = 1
+ELFDATA2MSB = 2
+ET_REL = 1
+PT_LOAD = 1
+SHF_ALLOC = 0x2
+EM_386 = 3
+EM_MIPS = 8
+EM_ARM = 40
+EM_X86_64 = 62
+EM_AARCH64 = 183
+
+DEFAULT_BINARY_LANGUAGE_ID = "x86:LE:64:default"
+DEFAULT_BINARY_BASE_ADDR = "0"
+
+AUTO_BINARY_LANGUAGE_MAP = {
+    (EM_386, "LE", 32): "x86:LE:32:default",
+    (EM_X86_64, "LE", 64): "x86:LE:64:default",
+    (EM_ARM, "LE", 32): "ARM:LE:32:v8",
+    (EM_ARM, "BE", 32): "ARM:BE:32:v8",
+    (EM_AARCH64, "LE", 64): "AARCH64:LE:64:v8A",
+    (EM_AARCH64, "BE", 64): "AARCH64:BE:64:v8A",
+    (EM_AARCH64, "LE", 32): "AARCH64:LE:32:ilp32",
+    (EM_AARCH64, "BE", 32): "AARCH64:BE:32:ilp32",
+    (EM_MIPS, "LE", 32): "MIPS:LE:32:default",
+    (EM_MIPS, "BE", 32): "MIPS:BE:32:default",
+    (EM_MIPS, "LE", 64): "MIPS:LE:64:default",
+    (EM_MIPS, "BE", 64): "MIPS:BE:64:default",
 }
 
 
@@ -111,6 +144,171 @@ def append_failure_log(log_fp, failure_info):
         f.write("\n")
 
 
+def read_elf_metadata(bin_fp):
+    with open(bin_fp, "rb") as f:
+        header = f.read(64)
+
+    if len(header) < 20:
+        raise ValueError("File is too small to contain a valid ELF header.")
+    if header[:4] != ELF_MAGIC:
+        raise ValueError("Auto detection requires an ELF file.")
+
+    elf_class = header[4]
+    ei_data = header[5]
+
+    if elf_class == ELFCLASS32:
+        bits = 32
+    elif elf_class == ELFCLASS64:
+        bits = 64
+    else:
+        raise ValueError(f"Unsupported ELF class: {elf_class}")
+
+    if ei_data == ELFDATA2LSB:
+        endian = "LE"
+        unpack_prefix = "<"
+    elif ei_data == ELFDATA2MSB:
+        endian = "BE"
+        unpack_prefix = ">"
+    else:
+        raise ValueError(f"Unsupported ELF data encoding: {ei_data}")
+
+    if bits == 32:
+        if len(header) < 52:
+            raise ValueError("File is too small to contain a valid ELF32 header.")
+        e_type, e_machine = struct.unpack(unpack_prefix + "HH", header[16:20])
+        e_phoff = struct.unpack(unpack_prefix + "I", header[28:32])[0]
+        e_shoff = struct.unpack(unpack_prefix + "I", header[32:36])[0]
+        e_phentsize, e_phnum = struct.unpack(unpack_prefix + "HH", header[42:46])
+        e_shentsize, e_shnum = struct.unpack(unpack_prefix + "HH", header[46:50])
+    else:
+        if len(header) < 64:
+            raise ValueError("File is too small to contain a valid ELF64 header.")
+        e_type, e_machine = struct.unpack(unpack_prefix + "HH", header[16:20])
+        e_phoff = struct.unpack(unpack_prefix + "Q", header[32:40])[0]
+        e_shoff = struct.unpack(unpack_prefix + "Q", header[40:48])[0]
+        e_phentsize, e_phnum = struct.unpack(unpack_prefix + "HH", header[54:58])
+        e_shentsize, e_shnum = struct.unpack(unpack_prefix + "HH", header[58:62])
+
+    return {
+        "bits": bits,
+        "endian": endian,
+        "unpack_prefix": unpack_prefix,
+        "e_type": e_type,
+        "e_machine": e_machine,
+        "e_phoff": e_phoff,
+        "e_shoff": e_shoff,
+        "e_phentsize": e_phentsize,
+        "e_phnum": e_phnum,
+        "e_shentsize": e_shentsize,
+        "e_shnum": e_shnum,
+    }
+
+
+def detect_elf_language_id(bin_fp):
+    elf_meta = read_elf_metadata(bin_fp)
+    language_id = AUTO_BINARY_LANGUAGE_MAP.get(
+        (elf_meta["e_machine"], elf_meta["endian"], elf_meta["bits"])
+    )
+    if language_id is None:
+        raise ValueError(
+            "Unsupported ELF machine/endian/bits combination: "
+            f"e_machine={elf_meta['e_machine']}, endian={elf_meta['endian']}, bits={elf_meta['bits']}"
+        )
+    return language_id
+
+
+def iter_elf_program_headers(bin_fp, elf_meta):
+    bits = elf_meta["bits"]
+    unpack_prefix = elf_meta["unpack_prefix"]
+    with open(bin_fp, "rb") as f:
+        for idx in range(elf_meta["e_phnum"]):
+            offset = elf_meta["e_phoff"] + idx * elf_meta["e_phentsize"]
+            f.seek(offset)
+            data = f.read(elf_meta["e_phentsize"])
+            if len(data) < elf_meta["e_phentsize"]:
+                break
+            if bits == 32:
+                p_type, _, p_vaddr, _, _, p_memsz = struct.unpack(
+                    unpack_prefix + "IIIIII", data[:24]
+                )
+            else:
+                p_type = struct.unpack(unpack_prefix + "I", data[:4])[0]
+                p_vaddr = struct.unpack(unpack_prefix + "Q", data[16:24])[0]
+                p_memsz = struct.unpack(unpack_prefix + "Q", data[40:48])[0]
+            yield {
+                "p_type": p_type,
+                "p_vaddr": p_vaddr,
+                "p_memsz": p_memsz,
+            }
+
+
+def iter_elf_section_headers(bin_fp, elf_meta):
+    bits = elf_meta["bits"]
+    unpack_prefix = elf_meta["unpack_prefix"]
+    with open(bin_fp, "rb") as f:
+        for idx in range(elf_meta["e_shnum"]):
+            offset = elf_meta["e_shoff"] + idx * elf_meta["e_shentsize"]
+            f.seek(offset)
+            data = f.read(elf_meta["e_shentsize"])
+            if len(data) < elf_meta["e_shentsize"]:
+                break
+            if bits == 32:
+                sh_flags = struct.unpack(unpack_prefix + "I", data[8:12])[0]
+                sh_addr = struct.unpack(unpack_prefix + "I", data[12:16])[0]
+                sh_size = struct.unpack(unpack_prefix + "I", data[20:24])[0]
+            else:
+                sh_flags = struct.unpack(unpack_prefix + "Q", data[8:16])[0]
+                sh_addr = struct.unpack(unpack_prefix + "Q", data[16:24])[0]
+                sh_size = struct.unpack(unpack_prefix + "Q", data[32:40])[0]
+            yield {
+                "sh_flags": sh_flags,
+                "sh_addr": sh_addr,
+                "sh_size": sh_size,
+            }
+
+
+def detect_elf_base_addr(bin_fp):
+    elf_meta = read_elf_metadata(bin_fp)
+    if elf_meta["e_type"] == ET_REL:
+        return DEFAULT_BINARY_BASE_ADDR
+
+    load_addrs = [
+        ph["p_vaddr"]
+        for ph in iter_elf_program_headers(bin_fp, elf_meta)
+        if ph["p_type"] == PT_LOAD and ph["p_memsz"] > 0
+    ]
+    if load_addrs:
+        return hex(min(load_addrs))
+
+    section_addrs = [
+        sh["sh_addr"]
+        for sh in iter_elf_section_headers(bin_fp, elf_meta)
+        if (sh["sh_flags"] & SHF_ALLOC) and sh["sh_size"] > 0 and sh["sh_addr"] >= 0
+    ]
+    if section_addrs:
+        return hex(min(section_addrs))
+
+    return DEFAULT_BINARY_BASE_ADDR
+
+
+def resolve_binary_language_id(bin_fp, binary_language_id):
+    if binary_language_id != "auto":
+        return binary_language_id
+    try:
+        return detect_elf_language_id(bin_fp)
+    except Exception:
+        return DEFAULT_BINARY_LANGUAGE_ID
+
+
+def resolve_binary_base_addr(bin_fp, binary_base_addr):
+    if binary_base_addr != "auto":
+        return binary_base_addr
+    try:
+        return detect_elf_base_addr(bin_fp)
+    except Exception:
+        return DEFAULT_BINARY_BASE_ADDR
+
+
 def get_bin_selector(
     bin_fp,
     firmware_info,
@@ -139,7 +337,14 @@ def get_bin_selector(
         return f"-m ar-obj -af {obj_name}", None
 
     if load_mode == "binary":
-        return f"-m binary -l {binary_language_id} -b {binary_base_addr}", None
+        resolved_language_id = resolve_binary_language_id(
+            bin_fp, binary_language_id
+        )
+        resolved_base_addr = resolve_binary_base_addr(bin_fp, binary_base_addr)
+        return (
+            f"-m binary -l {resolved_language_id} -b {resolved_base_addr}",
+            None,
+        )
 
     return "-m elf", None
 
@@ -301,14 +506,14 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--binary_language_id",
-        default="x86:LE:64:default",
-        help="Language id used when --load_mode=binary. ",
+        default="auto",
+        help="Language id used when --load_mode=binary. Set to 'auto' to detect from the ELF header. ",
     )
 
     parser.add_argument(
         "--binary_base_addr",
-        default="0",
-        help="Base address used when --load_mode=binary. ",
+        default="auto",
+        help="Base address used when --load_mode=binary. Set to 'auto' to detect from the ELF header when possible. ",
     )
 
     args = parser.parse_args()
