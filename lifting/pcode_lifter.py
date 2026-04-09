@@ -111,8 +111,48 @@ def append_failure_log(log_fp, failure_info):
         f.write("\n")
 
 
+def get_bin_selector(
+    bin_fp,
+    firmware_info,
+    load_mode,
+    binary_language_id,
+    binary_base_addr,
+):
+    if firmware_info is not None:
+        language_id, load_addr = firmware_info
+        return f"-m binary -l {language_id} -b {load_addr}", None
+
+    if bin_fp.endswith(".a"):
+        obj_name = None
+        for name, obj in AR_OBJ_MAP.items():
+            if bin_fp.endswith(name):
+                obj_name = obj
+                break
+        if obj_name is None:
+            return None, make_failure_info(
+                -2,
+                "",
+                bin_fp=bin_fp,
+                stage="prepare",
+                stderr="Archive object mapping is missing for this binary.\n",
+            )
+        return f"-m ar-obj -af {obj_name}", None
+
+    if load_mode == "binary":
+        return f"-m binary -l {binary_language_id} -b {binary_base_addr}", None
+
+    return "-m elf", None
+
+
 def do_one_extractor(
-    cfg_summary_fp, graph_type, verbose, output_dir, firmware_info=None
+    cfg_summary_fp,
+    graph_type,
+    verbose,
+    output_dir,
+    firmware_info=None,
+    load_mode="auto",
+    binary_language_id="x86:LE:64:default",
+    binary_base_addr="0",
 ):
     bin_fp = None
     output_fp = None
@@ -127,27 +167,18 @@ def do_one_extractor(
         output_name = bin_base + ACFG_POSTFIX
         output_fp = os.path.join(output_dir, output_name)
 
-        if firmware_info is not None:
-            language_id, load_addr = firmware_info
-            bin_selector = f"-m binary -l {language_id} -b {load_addr}"
-        elif bin_fp.endswith(".a"):
-            obj_name = None
-            for name, obj in AR_OBJ_MAP.items():
-                if bin_fp.endswith(name):
-                    obj_name = obj
-                    break
-            if obj_name is None:
-                return -2, make_failure_info(
-                    -2,
-                    cfg_summary_fp,
-                    bin_fp=bin_fp,
-                    output_fp=output_fp,
-                    stage="prepare",
-                    stderr="Archive object mapping is missing for this binary.\n",
-                )
-            bin_selector = f"-m ar-obj -af {obj_name}"
-        else:
-            bin_selector = "-m elf"
+        bin_selector, selector_failure = get_bin_selector(
+            bin_fp,
+            firmware_info,
+            load_mode,
+            binary_language_id,
+            binary_base_addr,
+        )
+        if selector_failure is not None:
+            selector_failure["cfg_summary_fp"] = cfg_summary_fp
+            selector_failure["output_fp"] = output_fp
+            return selector_failure["code"], selector_failure
+
         enable_assert = "-ea"
         # enable_assert = ""
         prefer_raw = "-opt 0"
@@ -261,12 +292,33 @@ if __name__ == "__main__":
         "--firmware_info", default=None, help="Number of processes to use. "
     )
 
+    parser.add_argument(
+        "--load_mode",
+        default="auto",
+        choices=["auto", "elf", "binary"],
+        help="Loading mode for regular binaries. 'auto' preserves the original behavior, while 'binary' forces the raw binary loader. ",
+    )
+
+    parser.add_argument(
+        "--binary_language_id",
+        default="x86:LE:64:default",
+        help="Language id used when --load_mode=binary. ",
+    )
+
+    parser.add_argument(
+        "--binary_base_addr",
+        default="0",
+        help="Base address used when --load_mode=binary. ",
+    )
+
     args = parser.parse_args()
 
-    cfg_summary_dir, output_dir, graph_type, verbose = (
+    cfg_summary_dir, output_dir, graph_type, verbose, load_mode = (
         getattr(args, arg)
-        for arg in ["cfg_summary", "output_dir", "graph_type", "verbose"]
+        for arg in ["cfg_summary", "output_dir", "graph_type", "verbose", "load_mode"]
     )
+    binary_language_id = args.binary_language_id
+    binary_base_addr = args.binary_base_addr
 
     firmware_info = None
     if args.firmware_info is not None:
@@ -285,6 +337,12 @@ if __name__ == "__main__":
             % datetime.now().isoformat(timespec="seconds")
         )
     print(f"Failure log path: {failure_log_fp}")
+    print(f"Load mode: {load_mode}")
+    if load_mode == "binary" and firmware_info is None:
+        print(
+            "Binary loader config: language_id=%s base_addr=%s"
+            % (binary_language_id, binary_base_addr)
+        )
     summary_files = os.listdir(cfg_summary_dir)
 
     processed = []
@@ -322,6 +380,9 @@ if __name__ == "__main__":
                 firmware_info[summary_fn[: -len(CFG_SUMMARY_POSTFIX)]]
                 if firmware_info is not None
                 else None,
+                load_mode,
+                binary_language_id,
+                binary_base_addr,
             )
             for summary_fn in summary_files
         ],

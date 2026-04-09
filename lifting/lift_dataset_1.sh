@@ -4,7 +4,10 @@ python lifting/pcode_lifter.py \
     --output_dir ./dbs/Dataset-1/features/training/pcode_raw_Dataset-1_training \
     --graph_type ALL \
     --verbose 1 \
-    --nproc 32
+    --nproc 32 \
+    --load_mode binary \
+    --binary_language_id x86:LE:64:default \
+    --binary_base_addr 0
 
 echo "building validation_Dataset-1"
 python lifting/pcode_lifter.py \
@@ -12,7 +15,10 @@ python lifting/pcode_lifter.py \
     --output_dir ./dbs/Dataset-1/features/validation/pcode_raw_Dataset-1_validation \
     --graph_type ALL \
     --verbose 1 \
-    --nproc 32
+    --nproc 32 \
+    --load_mode binary \
+    --binary_language_id x86:LE:64:default \
+    --binary_base_addr 0
 
 echo "building testing_Dataset-1"
 python lifting/pcode_lifter.py \
@@ -20,4 +26,7 @@ python lifting/pcode_lifter.py \
     --output_dir ./dbs/Dataset-1/features/testing/pcode_raw_Dataset-1_testing \
     --graph_type ALL \
     --verbose 1 \
-    --nproc 32
+    --nproc 32 \
+    --load_mode binary \
+    --binary_language_id x86:LE:64:default \
+    --binary_base_addr 0
