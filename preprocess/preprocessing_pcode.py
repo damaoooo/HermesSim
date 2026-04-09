@@ -15,11 +15,12 @@
 
 import click
 import json
-import networkx as nx
 import numpy as np
 import os
 import pickle
 import traceback
+import shutil
+import gc
 
 from typing import Dict
 import multiprocessing
@@ -86,6 +87,66 @@ def write_failure_log(output_dir, dataset, stage, failures):
             f_out.write("=" * 80)
             f_out.write("\n")
     return log_path
+
+
+def dump_pickle_file(obj, output_path):
+    with open(output_path, "wb") as f_out:
+        pickle.dump(obj, f_out)
+
+
+def load_pickle_file(input_path):
+    with open(input_path, "rb") as f_in:
+        return pickle.load(f_in)
+
+
+def reset_dir(dir_path):
+    if os.path.exists(dir_path):
+        shutil.rmtree(dir_path)
+    os.makedirs(dir_path, exist_ok=True)
+
+
+def remove_paths(paths):
+    for path in paths:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def get_graph_output_name(freq_mode, dump_kind):
+    suffix = "json" if dump_kind == "str" else "pkl"
+    return f"graph_func_dict_opc_{freq_mode}.{suffix}"
+
+
+def get_graph_output_path(output_dir, gtype, dataset, freq_mode, dump_kind):
+    sub_dir = get_sub_dir(output_dir, gtype, dataset)
+    return os.path.join(sub_dir, get_graph_output_name(freq_mode, dump_kind))
+
+
+def get_shard_dir(output_dir, gtype, dataset, freq_mode, dump_kind):
+    sub_dir = get_sub_dir(output_dir, gtype, dataset)
+    output_name = get_graph_output_name(freq_mode, dump_kind)
+    return os.path.join(sub_dir, f".{output_name}.shards")
+
+
+def prepare_shard_dirs(output_dir, dataset, freq_mode, dump_str, dump_pkl):
+    shard_dirs = {"str": {}, "pkl": {}}
+    if dump_str:
+        for gtype in GRAPH_TYPES:
+            shard_dir = get_shard_dir(output_dir, gtype, dataset, freq_mode, "str")
+            reset_dir(shard_dir)
+            shard_dirs["str"][gtype] = shard_dir
+    if dump_pkl:
+        for gtype in GRAPH_TYPES:
+            shard_dir = get_shard_dir(output_dir, gtype, dataset, freq_mode, "pkl")
+            reset_dir(shard_dir)
+            shard_dirs["pkl"][gtype] = shard_dir
+    return shard_dirs
+
+
+def cleanup_shard_dirs(shard_dirs):
+    for shard_kind in shard_dirs.values():
+        for shard_dir in shard_kind.values():
+            if os.path.exists(shard_dir):
+                shutil.rmtree(shard_dir)
 
 def parse_nxopr(pcode_asm):
     s = pcode_asm.find('(')
@@ -477,34 +538,39 @@ def token_mapping(input_folder, output_dir, freq_mode=True):
     return idmaps
 
 
-def create_graph(fva_data):
+def create_graph_coo_tuple(fva_data):
     NUM_EDGE_TYPE = 4
     NUM_POS_ENC = 8
 
     nodes, edges = fva_data['nodes'], fva_data['edges']
-
-    G = nx.MultiDiGraph()
+    nodelist = []
+    node_to_idx = {}
     for node in nodes:
-        G.add_node(node)
+        if node not in node_to_idx:
+            node_to_idx[node] = len(nodelist)
+            nodelist.append(node)
+    row = np.empty(len(edges), dtype=np.int64)
+    col = np.empty(len(edges), dtype=np.int64)
+    data = np.empty(len(edges), dtype=np.int8)
     last_edge, pos_id = (-1, -1), -1
-    for edge in edges:
+    for idx, edge in enumerate(edges):
+        if edge[0] not in node_to_idx:
+            node_to_idx[edge[0]] = len(nodelist)
+            nodelist.append(edge[0])
+        if edge[1] not in node_to_idx:
+            node_to_idx[edge[1]] = len(nodelist)
+            nodelist.append(edge[1])
         if (edge[0], edge[2]) == last_edge:
             if pos_id + 1 < NUM_POS_ENC:
                 pos_id += 1
         else:
             pos_id = 0
             last_edge = (edge[0], edge[2])
-        n = NUM_EDGE_TYPE * pos_id + edge[2]
-        G.add_edge(edge[0], edge[1], weight=n)
+        row[idx] = node_to_idx[edge[0]]
+        col[idx] = node_to_idx[edge[1]]
+        data[idx] = NUM_EDGE_TYPE * pos_id + edge[2]
 
-    nodelist = list(G.nodes())
-    adj_mat = nx.to_scipy_sparse_array(
-        G, nodelist=nodelist, dtype=np.int8, format='coo')
-    return adj_mat, nodelist
-
-
-def coo2tuple(coo_mat):
-    return (coo_mat.row, coo_mat.col, coo_mat.data, *coo_mat.shape)
+    return (row, col, data, len(nodelist), len(nodelist)), nodelist
 
 
 def create_features_matrix(node_list, fva_data, opc_dict, gtype, arch):
@@ -550,11 +616,7 @@ def create_features_matrix(node_list, fva_data, opc_dict, gtype, arch):
     return np.array(asms, dtype=np.uint16)
 
 
-def csc_matrix_to_str(csr_mat):
-    return coo_matrix_to_str(csr_mat.tocoo())
-
-
-def coo_matrix_to_str(cmat):
+def coo_tuple_to_str(graph_tuple):
     """
     Convert the Numpy matrix in input to a Scipy sparse matrix.
 
@@ -564,13 +626,12 @@ def coo_matrix_to_str(cmat):
     Return
         str: serialized matrix
     """
+    row, col, data, n_row, n_col = graph_tuple
     # Custom string serialization
-    row_str = ';'.join([str(x) for x in cmat.row])
-    col_str = ';'.join([str(x) for x in cmat.col])
-    data_str = ';'.join([str(x) for x in cmat.data])
-    n_row = str(cmat.shape[0])
-    n_col = str(cmat.shape[1])
-    mat_str = "::".join([row_str, col_str, data_str, n_row, n_col])
+    row_str = ';'.join([str(x) for x in row])
+    col_str = ';'.join([str(x) for x in col])
+    data_str = ';'.join([str(x) for x in data])
+    mat_str = "::".join([row_str, col_str, data_str, str(n_row), str(n_col)])
     return mat_str
 
 def process_one_file(args):
@@ -590,32 +651,53 @@ def process_one_file(args):
     for fva in j_data:
         for gtype in GRAPH_TYPES:
             fva_data = j_data[fva][gtype]
-            g_coo_mat, nodes = create_graph(fva_data)
+            graph_tuple, nodes = create_graph_coo_tuple(fva_data)
             f_list = create_features_matrix(
                 nodes, fva_data, opc_dicts[gtype], gtype, arch)
             if not fva.startswith("0x"):
                 fva = hex(int(fva, 10))
             if dump_str:
                 str_func_dict[gtype][fva] = {
-                    'graph': coo_matrix_to_str(g_coo_mat),
+                    'graph': coo_tuple_to_str(graph_tuple),
                     'opc': f_list
                 }
             if dump_pkl:
                 pkl_func_dict[gtype][fva] = {
-                    'graph': coo2tuple(g_coo_mat),
+                    'graph': graph_tuple,
                     'opc': f_list
                 }
     return idb_path, str_func_dict, pkl_func_dict
 
-def process_one_file_safe(args):
-    json_path = args[0]
+def process_one_file_to_shards_safe(args):
+    shard_idx, json_path, opc_dicts, dump_str, dump_pkl, shard_dirs = args
+    created_paths = []
     try:
-        return {
-            "ok": True,
-            "json_path": json_path,
-            "result": process_one_file(args),
-        }
+        idb_path, str_func_dict, pkl_func_dict = process_one_file(
+            (json_path, opc_dicts, dump_str, dump_pkl)
+        )
+        result = {"ok": True, "json_path": json_path, "shards": {"str": {}, "pkl": {}}}
+
+        if dump_str:
+            for gtype, data in str_func_dict.items():
+                shard_path = os.path.join(
+                    shard_dirs["str"][gtype], f"{shard_idx:06d}.pkl"
+                )
+                dump_pickle_file((idb_path, data), shard_path)
+                created_paths.append(shard_path)
+                result["shards"]["str"][gtype] = shard_path
+
+        if dump_pkl:
+            for gtype, data in pkl_func_dict.items():
+                shard_path = os.path.join(
+                    shard_dirs["pkl"][gtype], f"{shard_idx:06d}.pkl"
+                )
+                dump_pickle_file((idb_path, data), shard_path)
+                created_paths.append(shard_path)
+                result["shards"]["pkl"][gtype] = shard_path
+
+        return result
     except Exception as exc:
+        remove_paths(created_paths)
         return {
             "ok": False,
             "json_path": json_path,
@@ -624,15 +706,18 @@ def process_one_file_safe(args):
         }
 
 
-def create_functions_dict_parallel(input_folder, output_dir, dataset, opc_dicts, dump_str, dump_pkl):
-    str_func_dict = {g:defaultdict(dict) for g in GRAPH_TYPES} if dump_str else {}
-    pkl_func_dict = {g:defaultdict(dict) for g in GRAPH_TYPES} if dump_pkl else {}
+def create_function_shards_parallel(input_folder, output_dir, dataset, freq_mode, opc_dicts, dump_str, dump_pkl):
+    shard_dirs = prepare_shard_dirs(output_dir, dataset, freq_mode, dump_str, dump_pkl)
+    shard_manifests = {
+        "str": {gtype: [] for gtype in GRAPH_TYPES},
+        "pkl": {gtype: [] for gtype in GRAPH_TYPES},
+    }
     args = []
-    for f_json in sorted(os.listdir(input_folder)):
+    for shard_idx, f_json in enumerate(sorted(os.listdir(input_folder))):
         if not f_json.endswith(".json"):
             continue
         json_path = os.path.join(input_folder, f_json)
-        args.append((json_path, opc_dicts, dump_str, dump_pkl))
+        args.append((shard_idx, json_path, opc_dicts, dump_str, dump_pkl, shard_dirs))
 
     failures = []
     worker_count = get_worker_count(len(args))
@@ -642,7 +727,7 @@ def create_functions_dict_parallel(input_folder, output_dir, dataset, opc_dicts,
     success_count = 0
     with multiprocessing.Pool(processes=worker_count, maxtasksperchild=32) as pool:
         for response in tqdm(
-            pool.imap_unordered(process_one_file_safe, args, chunksize=chunksize),
+            pool.imap_unordered(process_one_file_to_shards_safe, args, chunksize=chunksize),
             total=len(args),
             desc="create functions dict",
             dynamic_ncols=True,
@@ -651,54 +736,59 @@ def create_functions_dict_parallel(input_folder, output_dir, dataset, opc_dicts,
                 failures.append(response)
                 continue
             success_count += 1
-            idb_path, str_func_one, pkl_func_one = response["result"]
             if dump_str:
-                for gtype, data in str_func_one.items():
-                    str_func_dict[gtype][idb_path] = data
+                for gtype, shard_path in response["shards"]["str"].items():
+                    shard_manifests["str"][gtype].append(shard_path)
             if dump_pkl:
-                for gtype, data in pkl_func_one.items():
-                    pkl_func_dict[gtype][idb_path] = data
+                for gtype, shard_path in response["shards"]["pkl"].items():
+                    shard_manifests["pkl"][gtype].append(shard_path)
 
     failure_log = write_failure_log(output_dir, dataset, "create_functions_dict", failures)
     if failure_log is not None:
         print(f"[W] Function dict creation failed for {len(failures)} file(s). See {failure_log}")
     if args and success_count == 0:
+        cleanup_shard_dirs(shard_dirs)
         raise RuntimeError(
             f"Function dict creation failed for all input files. See {failure_log}"
         )
 
-    print("[D] All processes finished.")
-    return str_func_dict, pkl_func_dict
+    for dump_kind in ["str", "pkl"]:
+        for gtype in GRAPH_TYPES:
+            shard_manifests[dump_kind][gtype].sort()
+
+    print("[D] All shard writers finished.")
+    return shard_manifests, shard_dirs
 
 
-def create_functions_dict(input_folder, opc_dicts, dump_str, dump_pkl):
-    """
-    Convert each function into a graph with BB-level features.
-
-    Args:
-        input_folder: a folder with JSON files from IDA_acfg_disasm
-        opc_dict: dictionary that maps most common opcodes to their ranking.
-
-    Return
-        dict: map each function to a graph and features matrix
-    """
-    str_func_dict = {g:defaultdict(dict) for g in GRAPH_TYPES} if dump_str else {}
-    pkl_func_dict = {g:defaultdict(dict) for g in GRAPH_TYPES} if dump_pkl else {}
-    args = []
-    for f_json in os.listdir(input_folder):
-        if not f_json.endswith(".json"):
+def merge_function_shards(output_dir, dataset, freq_mode, dump_kind, shard_paths_by_gtype):
+    for gtype in GRAPH_TYPES:
+        shard_paths = shard_paths_by_gtype[gtype]
+        if not shard_paths:
             continue
-        json_path = os.path.join(input_folder, f_json)
-        args.append((json_path, opc_dicts, dump_str, dump_pkl))
-    for idb_path, str_func_one, pkl_func_one in \
-        tqdm(map(process_one_file, args), total=len(args), desc="create functions dict"):
-        if dump_str:
-            for gtype, data in str_func_one.items():
-                str_func_dict[gtype][idb_path] = data
-        if dump_pkl:
-            for gtype, data in pkl_func_one.items():
-                pkl_func_dict[gtype][idb_path] = data
-    return str_func_dict, pkl_func_dict
+
+        merged = defaultdict(dict)
+        desc = f"merge {gtype.lower()} {dump_kind}"
+        for shard_path in tqdm(shard_paths, desc=desc, dynamic_ncols=True):
+            idb_path, data = load_pickle_file(shard_path)
+            merged[idb_path] = data
+
+        output_path = get_graph_output_path(output_dir, gtype, dataset, freq_mode, dump_kind)
+        if dump_kind == "str":
+            with open(output_path, "w") as f_out:
+                json.dump(merged, f_out)
+        else:
+            dump_pickle_file(merged, output_path)
+
+        del merged
+        gc.collect()
+
+
+def finalize_function_shards(output_dir, dataset, freq_mode, dump_str, dump_pkl, shard_manifests, shard_dirs):
+    if dump_str:
+        merge_function_shards(output_dir, dataset, freq_mode, "str", shard_manifests["str"])
+    if dump_pkl:
+        merge_function_shards(output_dir, dataset, freq_mode, "pkl", shard_manifests["pkl"])
+    cleanup_shard_dirs(shard_dirs)
 
 
 def get_sub_dir(output_dir, gtype, dataset=None):
@@ -706,8 +796,7 @@ def get_sub_dir(output_dir, gtype, dataset=None):
         sub_dir = os.path.join(output_dir, f'pcode_{gtype.lower()}', dataset)
     else:
         sub_dir = os.path.join(output_dir, f'pcode_{gtype.lower()}')
-    if not os.path.exists(sub_dir):
-        os.makedirs(sub_dir)
+    os.makedirs(sub_dir, exist_ok=True)
     return sub_dir
 
 
@@ -758,20 +847,10 @@ def main(input_dir, training, freq_mode, opcodes_json, output_dir, dataset, out_
     dump_str = out_format == "json" or out_format == "both"
     dump_pkl = out_format == "pkl" or out_format == "both"
 
-    str_dict, pkl_dict = create_functions_dict_parallel(
-        input_dir, output_dir, dataset, opc_dicts, dump_str, dump_pkl)
-    for gtype, g_str_dict in str_dict.items():
-        o_json = "graph_func_dict_opc_{}.json".format(freq_mode)
-        sub_dir = get_sub_dir(output_dir, gtype, dataset)
-        output_path = os.path.join(sub_dir, o_json)
-        with open(output_path, 'w') as f_out:
-            json.dump(g_str_dict, f_out)
-    for gtype, g_pkl_dict in pkl_dict.items():
-        o_json = "graph_func_dict_opc_{}.pkl".format(freq_mode)
-        sub_dir = get_sub_dir(output_dir, gtype, dataset)
-        output_path = os.path.join(sub_dir, o_json)
-        with open(output_path, 'wb') as f_out:
-            pickle.dump(g_pkl_dict, f_out)
+    shard_manifests, shard_dirs = create_function_shards_parallel(
+        input_dir, output_dir, dataset, freq_mode, opc_dicts, dump_str, dump_pkl)
+    finalize_function_shards(
+        output_dir, dataset, freq_mode, dump_str, dump_pkl, shard_manifests, shard_dirs)
 
 
 if __name__ == '__main__':
