@@ -74,13 +74,45 @@ class DatasetWrap(data.IterableDataset):
     def reset_seed(self, seed):
         return self.gen.reset_seed(seed)
 
+
+def _sync_embed_config(config, *factories):
+    encoder_config = config.get('encoder', {})
+    if encoder_config.get('name') != 'embed':
+        return
+
+    embed_config = encoder_config.get('embed', {})
+    if not embed_config:
+        return
+
+    required = {}
+    with_pos_enc = embed_config.get('n_pos_enc', 0) > 0
+    n_edge_attr = embed_config.get('n_edge_attr')
+    for factory in factories:
+        if factory is None:
+            continue
+        req = factory.get_embed_requirements(
+            n_edge_attr=n_edge_attr,
+            with_pos_enc=with_pos_enc,
+        )
+        for key, val in req.items():
+            required[key] = max(required.get(key, 0), val)
+
+    for key, needed in required.items():
+        current = embed_config.get(key, 0)
+        if needed > current:
+            log.warning(
+                "Auto-adjust encoder.embed.%s from %s to %s based on loaded features",
+                key, current, needed,
+            )
+            embed_config[key] = needed
+
 def build_train_validation_generators(config):
     """Utility function to build train and validation batch generators.
 
     Args
       config: global configuration
     """
-    training_gen = DatasetWrap(GraphFactoryTraining(
+    training_factory = GraphFactoryTraining(
         func_path=config['training']['df_train_path'],
         feat_path=config['training']['features_train_path'],
         batch_size=config['training']['batch_size'],
@@ -89,7 +121,7 @@ def build_train_validation_generators(config):
         n_sim_funcs=config['training']['n_sim_funcs'], 
         used_subgraphs=config['used_subgraphs'], 
         edge_feature_dim=config['edge_feature_dim'],
-    ), config['training']['mode'])
+    )
 
     validation_gen = GraphFactoryTesting(
         func_info_path=config['validation']['func_info_csv_path'],
@@ -98,6 +130,9 @@ def build_train_validation_generators(config):
         used_subgraphs=config['used_subgraphs'], 
         edge_feature_dim=config['edge_feature_dim'],
     )
+
+    _sync_embed_config(config, training_factory, validation_gen)
+    training_gen = DatasetWrap(training_factory, config['training']['mode'])
 
     return training_gen, validation_gen
 
@@ -109,15 +144,17 @@ def build_testing_generator(config, csv_path):
       config: global configuration
       csv_path: CSV input path
     """
-    testing_gen = DatasetWrap(GraphFactoryInference(
+    testing_factory = GraphFactoryInference(
         func_path=csv_path,
         feat_path=config['testing']['features_testing_path'],
         batch_size=config['batch_size'],
         used_subgraphs=config['used_subgraphs'], 
         edge_feature_dim=config['edge_feature_dim'],
-    ), 'pair')
+    )
+
+    _sync_embed_config(config, testing_factory)
+    testing_gen = DatasetWrap(testing_factory, 'pair')
 
     return testing_gen
-
 
 

@@ -24,3 +24,6 @@ python preprocess/preprocessing_pcode.py \
     -i $DBDIR/$DATASET_NAME/features/testing/"$FEAT"_${DATASET_NAME}_testing \
     -o $OUTDIR
 
+echo "Generation validation CSV"
+python preprocess/generate_validation_csv.py
+

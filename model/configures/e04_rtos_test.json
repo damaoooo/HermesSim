@@ -3,8 +3,8 @@
         "args": {
             "dataset": "rtos",
             "test_outdir": "last",
-            "featuresdir": "inputs/pcode_raw/pcode_sog",
-            "feature_json_name": "graph_func_dict_opc_55.0.json"
+            "featuresdir": "inputs/pcode/pcode_sog",
+            "feature_json_name": "graph_func_dict_opc_True.pkl"
         }
     },
     "sog_0": {

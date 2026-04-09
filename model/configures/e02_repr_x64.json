@@ -32,7 +32,7 @@
     },
     "palmtree": {
         "args": {
-            "feature_json_name": "graph_func_dict_opc_55.0.json", 
+            "feature_json_name": "graph_func_dict_opc_True.pkl", 
             "featuresdir": "./inputs/palm_acfg"            
         }, 
         "encoder":{

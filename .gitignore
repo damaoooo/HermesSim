@@ -3,6 +3,7 @@
 /inputs
 /outputs
 /temp
+/Results
 __pycache__
 __cache__
 .vscode

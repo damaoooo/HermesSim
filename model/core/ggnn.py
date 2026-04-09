@@ -127,14 +127,32 @@ class EmbeddingEncoder(torch.nn.Module):
     def reset_parameters(self):
         reset_subnet(self.node_encoder)
         reset_subnet(self.edge_encoder)
+
+    def _validate_indices(self, name: str, tensor: Tensor, upper_bound: int) -> None:
+        if tensor.numel() == 0:
+            return
+        min_idx = int(tensor.min().item())
+        max_idx = int(tensor.max().item())
+        if min_idx < 0 or max_idx >= upper_bound:
+            raise RuntimeError(
+                f"{name} index out of range: observed [{min_idx}, {max_idx}], "
+                f"but embedding size is {upper_bound}. "
+                "Please regenerate features or increase the matching encoder config."
+            )
     
     def forward(self, x, e):
+        self._validate_indices("node", x, self.node_encoder.num_embeddings)
         x = self.node_encoder(x)
         if self._n_pos_enc > 0:
-            p = self.pos_encoder(e // self._n_edge_attr)
-            e = self.edge_encoder(e % self._n_edge_attr)
+            edge_type = e % self._n_edge_attr
+            edge_pos = e // self._n_edge_attr
+            self._validate_indices("edge type", edge_type, self.edge_encoder.num_embeddings)
+            self._validate_indices("edge position", edge_pos, self.pos_encoder.num_embeddings)
+            p = self.pos_encoder(edge_pos)
+            e = self.edge_encoder(edge_type)
             e += p
         else:
+            self._validate_indices("edge", e, self.edge_encoder.num_embeddings)
             e = self.edge_encoder(e)
         return x, e
 
@@ -208,6 +226,4 @@ class GGNN(torch.nn.Module):
         elif self._output_mode == 1:
             x = torch.cat(out_feats[self._concat_skip:], dim=-1)
         return self.aggr(x, graph_idx, batch_size)
-
-
 

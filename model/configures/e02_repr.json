@@ -40,12 +40,12 @@
     "tscg": {
         "encoder": {
             "embed": {
-                "n_node_attr": 645
+                "n_node_attr": 665
             }
         }, 
         "args": {
-            "feature_json_name": "graph_func_dict_opc_55.0.json", 
-            "featuresdir": "./inputs/pcode_raw/pcode_tscg"
+            "feature_json_name": "graph_func_dict_opc_True.pkl", 
+            "featuresdir": "./inputs/pcode/pcode_tscg"
         }, 
         "batch_size": 20, 
         "training": {
@@ -57,8 +57,8 @@
     }, 
     "iscg": {
         "args": {
-            "feature_json_name": "graph_func_dict_opc_55.0.json", 
-            "featuresdir": "./inputs/pcode_raw/pcode_iscg"
+            "feature_json_name": "graph_func_dict_opc_True.pkl", 
+            "featuresdir": "./inputs/pcode/pcode_iscg"
         }, 
         "batch_size": 20, 
         "training": {
@@ -81,8 +81,8 @@
     }, 
     "cdfg": {
         "args": {
-            "feature_json_name": "graph_func_dict_opc_55.0.json", 
-            "featuresdir": "./inputs/pcode_raw/pcode_iscg"
+            "feature_json_name": "graph_func_dict_opc_True.pkl", 
+            "featuresdir": "./inputs/pcode/pcode_iscg"
         }, 
         "batch_size": 20, 
         "used_subgraphs": [1,2], 
@@ -102,8 +102,8 @@
     }, 
     "dfg": {
         "args": {
-            "feature_json_name": "graph_func_dict_opc_55.0.json", 
-            "featuresdir": "./inputs/pcode_raw/pcode_iscg"
+            "feature_json_name": "graph_func_dict_opc_True.pkl", 
+            "featuresdir": "./inputs/pcode/pcode_iscg"
         }, 
         "batch_size": 20, 
         "used_subgraphs": [1], 

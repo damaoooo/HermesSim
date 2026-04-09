@@ -40,11 +40,11 @@
     "sog": {
         "encoder": {
             "embed": {
-                "n_node_attr": 461
+                "n_node_attr": 521
             }
         }, 
         "args": {
-            "feature_json_name": "graph_func_dict_opc_True.json", 
+            "feature_json_name": "graph_func_dict_opc_True.pkl", 
             "featuresdir": "./inputs/pcode/pcode_sog"
         }
     }
