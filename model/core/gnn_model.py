@@ -477,8 +477,13 @@ class GNNModel:
 
     def trace_model(self, batch_input):
         _ = self._model(*batch_input)
-        self._model = torch.jit.script(self._model, example_inputs={
-                                       self._model: list(batch_input)})
+        try:
+            self._model = torch.jit.script(self._model)
+        except Exception:
+            self._model = torch.jit.script(
+                self._model,
+                example_inputs={self._model: [tuple(batch_input)]},
+            )
         # self._model = torch.jit.trace(self._model, batch_input)
 
     # XLA_FLAGS=--xla_gpu_cuda_data_dir=$CONDA_PREFIX/lib
