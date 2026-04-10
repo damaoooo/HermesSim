@@ -75,18 +75,25 @@ class DatasetWrap(data.IterableDataset):
         return self.gen.reset_seed(seed)
 
 
-def _sync_embed_config(config, *factories):
+def _sync_encoder_config(config, *factories):
     encoder_config = config.get('encoder', {})
-    if encoder_config.get('name') != 'embed':
+    encoder_name = encoder_config.get('name')
+    if encoder_name not in {'embed', 'gru', 'hbmp'}:
         return
 
-    embed_config = encoder_config.get('embed', {})
-    if not embed_config:
+    if encoder_name == 'embed':
+        encoder_params = encoder_config.get('embed', {})
+    elif encoder_name == 'gru':
+        encoder_params = encoder_config.get('gru', {}).get('c', {})
+    else:
+        encoder_params = encoder_config.get('hbmp', {}).get('hbmp_config', {})
+
+    if not encoder_params:
         return
 
     required = {}
-    with_pos_enc = embed_config.get('n_pos_enc', 0) > 0
-    n_edge_attr = embed_config.get('n_edge_attr')
+    with_pos_enc = encoder_name == 'embed' and encoder_params.get('n_pos_enc', 0) > 0
+    n_edge_attr = encoder_params.get('n_edge_attr')
     for factory in factories:
         if factory is None:
             continue
@@ -97,14 +104,21 @@ def _sync_embed_config(config, *factories):
         for key, val in req.items():
             required[key] = max(required.get(key, 0), val)
 
-    for key, needed in required.items():
-        current = embed_config.get(key, 0)
+    key_map = {'n_node_attr': 'n_node_attr'} if encoder_name == 'embed' else {'n_node_attr': 'embed_size'}
+    if encoder_name == 'embed':
+        key_map['n_pos_enc'] = 'n_pos_enc'
+
+    for src_key, needed in required.items():
+        target_key = key_map.get(src_key)
+        if target_key is None:
+            continue
+        current = encoder_params.get(target_key, 0)
         if needed > current:
             log.warning(
-                "Auto-adjust encoder.embed.%s from %s to %s based on loaded features",
-                key, current, needed,
+                "Auto-adjust encoder.%s.%s from %s to %s based on loaded features",
+                encoder_name, target_key, current, needed,
             )
-            embed_config[key] = needed
+            encoder_params[target_key] = needed
 
 def build_train_validation_generators(config):
     """Utility function to build train and validation batch generators.
@@ -131,7 +145,7 @@ def build_train_validation_generators(config):
         edge_feature_dim=config['edge_feature_dim'],
     )
 
-    _sync_embed_config(config, training_factory, validation_gen)
+    _sync_encoder_config(config, training_factory, validation_gen)
     training_gen = DatasetWrap(training_factory, config['training']['mode'])
 
     return training_gen, validation_gen
@@ -152,9 +166,8 @@ def build_testing_generator(config, csv_path):
         edge_feature_dim=config['edge_feature_dim'],
     )
 
-    _sync_embed_config(config, testing_factory)
+    _sync_encoder_config(config, testing_factory)
     testing_gen = DatasetWrap(testing_factory, 'pair')
 
     return testing_gen
-
 
