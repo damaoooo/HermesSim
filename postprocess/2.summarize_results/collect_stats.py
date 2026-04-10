@@ -51,15 +51,28 @@ def collect_for_one_task(pos_pair_csv, in_dir):
                 root, pos_pair_csv, None, rank_method)
         if os.path.exists(result_csv_fp):
             result_dfs.append(pd.read_csv(result_csv_fp))
+    if not result_dfs:
+        print(f"[W] No result files found for {pos_pair_csv} under {in_dir}. Skip. ")
+        return False
     mrr_summary = pd.concat(result_dfs)
     mrr_summary.to_csv(join(in_dir, "summary_" + result_csv))
+    return True
 
 
 def collect_for_all_tasks(pair_dir, in_dir):
+    if not os.path.isdir(in_dir):
+        print(f"[W] Result directory {in_dir} does not exist. Nothing to collect. ")
+        return
+    num_tasks, num_summaries = 0, 0
     for root, _, filenames in os.walk(pair_dir):
         for fn in filenames:
             if fn.startswith("pos-") and fn.endswith(".csv"):
-                collect_for_one_task(join(root, fn), in_dir)
+                num_tasks += 1
+                num_summaries += int(collect_for_one_task(join(root, fn), in_dir))
+    if num_tasks == 0:
+        print(f"[W] No pos-*.csv found under {pair_dir}. ")
+    elif num_summaries == 0:
+        print(f"[W] No task summaries were generated from {num_tasks} task(s). ")
 
 
 if __name__ == '__main__':

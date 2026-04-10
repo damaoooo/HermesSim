@@ -91,6 +91,15 @@ def read_config(fp):
     return c[ds_info_key]
 
 
+def fit_restriction(arch, bit, proj, restriction_sets):
+    for key, allowed in restriction_sets.items():
+        if (key == 'arch' and arch not in allowed) or \
+            (key == 'bit' and bit not in allowed) or \
+                (key == 'proj' and proj not in allowed):
+            return False
+    return True
+
+
 if __name__ == "__main__":
     out_dir = sys.argv[1]
     config_fp = sys.argv[2]
@@ -98,28 +107,21 @@ if __name__ == "__main__":
     random.seed(SEED)
     summary = defaultdict(lambda: defaultdict(dict))
     df = pd.read_csv(ds_info_csv)
-    for idx, row in tqdm(df.iterrows(), total=len(df)):
-        idb_path = row['idb_path']
-        fva = row['fva']
-        arch, bit, opt = row['arch'], row['bit'], row['optimizations']
-        comp, cver = row['compiler'], row['version']
-        gsize = row['sizes']
-        proj = f"{row['project']}_{row['library']}"
-        fit = True
-        for key, allowed in RESTRICTION.items():
-            if (key == 'arch' and not arch in allowed) or \
-                (key == 'bit' and not bit in allowed) or \
-                    (key == 'proj' and not proj in allowed):
-                fit = False
-                break
-        if not fit:
+    restriction_sets = {key: set(value) for key, value in RESTRICTION.items()}
+    for row in tqdm(df.itertuples(index=True, name='DatasetRow'), total=len(df)):
+        idb_path = row.idb_path
+        arch, bit, opt = row.arch, row.bit, row.optimizations
+        comp, cver = row.compiler, row.version
+        gsize = row.sizes
+        proj = f"{row.project}_{row.library}"
+        if not fit_restriction(arch, bit, proj, restriction_sets):
             continue
-        f_id = (idb_path, fva)
         if not SIZE_RANGE_FOR_QUERY_ONLY and SIZE_RANGE is not None and (
                 np.isnan(gsize) or gsize < SIZE_RANGE[0] or gsize >= SIZE_RANGE[1]):
             continue
-        func_name = row['func_name']
-        start_ea = row['start_ea']
+        func_name = row.func_name
+        start_ea = row.start_ea
+        idx = row.Index
         ## Output Type
         # ,idb_path_1,fva_1,func_name_1,idb_path_2,fva_2,func_name_2,db_type
         if DB_TYPE == 'XO':
@@ -140,6 +142,10 @@ if __name__ == "__main__":
 
     n_syms = len(summary)
     all_syms = list(summary.keys())
+    syms_by_chosen_k = defaultdict(list)
+    for sym, sdata in summary.items():
+        for chosen_k in sdata.keys():
+            syms_by_chosen_k[chosen_k].append(sym)
     print(f"Number Symbols: {n_syms}")
     count, skipped = 0, 0
     out_triplets = [[[] for _ in range(4)] for _ in range(N_NEG_PER_POS+2)]
@@ -169,8 +175,7 @@ if __name__ == "__main__":
         pairs = random.sample(list(chosen_v.values()), 2)
 
         # 2. Sample a Pool for the Query
-        neg_cands = [s for s in all_syms if s !=
-                     sym and chosen_k in summary[s]]
+        neg_cands = [s for s in syms_by_chosen_k[chosen_k] if s != sym]
         if len(neg_cands) < N_NEG_PER_POS:
             skipped += 1
             continue
