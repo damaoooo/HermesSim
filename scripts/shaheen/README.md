@@ -30,7 +30,7 @@ done
 
 ## 2. lift（多节点 array）
 
-二进制目录结构必须是 `<binaries_root>/Dataset-1/<project>/<bin>`，也就是 `idb_path` 去掉开头的 `IDBs/` 和结尾的 `.i64`。
+`<binaries_root>` 下面可以是 `Dataset-1/<project>/<bin>`（`idb_path` 去掉开头的 `IDBs/` 和结尾的 `.i64`），也可以是 ReGraphv2 那种按 split 分开的 `Dataset-1/{train,validation,test}/<project>/<bin>`，两种都会自动识别。
 
 ```bash
 for s in training validation testing; do

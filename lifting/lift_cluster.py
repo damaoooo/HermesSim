@@ -98,10 +98,23 @@ def cmd_summaries(a):
 
 # ---------------------------------------------------------------------------- plan
 
+SPLIT_DIRS = ("train", "validation", "test")
+
+
 def idb_path_to_binary_path(idb_path, binaries_root):
-    """pcode_lifter.py's mapping IDBs/<rel>.i64 -> binaries/<rel>, with a configurable root."""
+    """pcode_lifter.py's mapping IDBs/<rel>.i64 -> binaries/<rel>, with a configurable root. Also accepts the
+    split layout <root>/Dataset-1/{train,validation,test}/<project>/<bin> used by ReGraphv2's Binaries/."""
     assert idb_path.startswith("IDBs/"), idb_path
-    return join(binaries_root, idb_path[len("IDBs/"):-4])
+    rel = idb_path[len("IDBs/"):-4]
+    flat = join(binaries_root, rel)
+    if os.path.exists(flat):
+        return flat
+    dataset, rest = rel.split("/", 1)
+    for split in SPLIT_DIRS:
+        cand = join(binaries_root, dataset, split, rest)
+        if os.path.exists(cand):
+            return cand
+    return flat
 
 
 def cmd_plan(a):
