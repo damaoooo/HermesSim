@@ -11,3 +11,4 @@ __cache__
 .venv/
 _dev/
 bin/*.jar
+logs/
