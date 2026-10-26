@@ -1,0 +1,26 @@
+[project]
+name = "hermessim"
+version = "0.1.0"
+description = "HermesSim (USENIX Security '24) with a scalable gsat lifting pipeline"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "click>=8.1",
+    "coloredlogs>=15.0",
+    "networkx>=3.1",
+    "numpy>=1.25",
+    "pandas>=2.0",
+    "scipy>=1.12",
+    "tqdm>=4.64",
+]
+
+[project.optional-dependencies]
+# Training / inference (model/). Lifting and preprocessing need only the base dependencies.
+model = [
+    "torch>=2.4",
+    "torch_geometric>=2.5",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.7",
+]
+
+[tool.uv]
+package = false

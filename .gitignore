@@ -8,3 +8,6 @@ __pycache__
 __cache__
 .vscode
 /bin/gsat-1.1.jar
+.venv/
+_dev/
+bin/*.jar

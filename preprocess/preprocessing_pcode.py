@@ -14,6 +14,7 @@
 ##############################################################################
 
 import click
+import gzip
 import json
 import numpy as np
 import os
@@ -30,6 +31,19 @@ from collections import defaultdict
 from tqdm import tqdm
 
 GRAPH_TYPES = ['ISCG','TSCG','SOG']
+
+
+def is_feature_file(name):
+    """Lifter outputs: <bin>_acfg_disasm.json, or .json.gz from lifting/lift_cluster.py."""
+    return name.endswith(".json") or name.endswith(".json.gz")
+
+
+def load_feature_json(path):
+    if path.endswith(".gz"):
+        with gzip.open(path, "rt") as f:
+            return json.load(f)
+    with open(path) as f:
+        return json.load(f)
 
 
 def make_counter_bucket():
@@ -264,8 +278,7 @@ def token_mapping_map(args):
             gtype: make_counter_bucket() for gtype in not_cached_graph_types
         }
 
-        with open(json_path) as f_in:
-            jj = json.load(f_in)
+        jj = load_feature_json(json_path)
 
         arch = f_json.split('-')[0][:-2]
         idb_path = list(jj.keys())[0]
@@ -339,7 +352,7 @@ def token_mapping_parallel(input_folder, output_dir, dataset, freq_mode=True):
 
         failures = []
         json_files = sorted(
-            f_json for f_json in os.listdir(input_folder) if f_json.endswith(".json")
+            f_json for f_json in os.listdir(input_folder) if is_feature_file(f_json)
         )
         worker_count = get_worker_count(len(json_files))
         chunksize = get_chunksize(len(json_files), worker_count)
@@ -400,10 +413,8 @@ def token_mapping_parallel(input_folder, output_dir, dataset, freq_mode=True):
         for ty, opc_cnt in opc_cnts.items():
             if ty.endswith("_occur"):
                 continue
-            if not isinstance(opc_cnt, dict):
-                opc_cnt = [(k,v) for k,v in opc_cnt.most_common()]
-            else:
-                opc_cnt = sorted(list(opc_cnt.items()), key=lambda k:k[1], reverse=True)
+            # Ties by token so the vocabulary does not depend on file / worker completion order.
+            opc_cnt = sorted(opc_cnt.items(), key=lambda kv: (-kv[1], kv[0]))
             mapped_cnt = 0
             tot_cnt = sum([v for _, v in opc_cnt])
             idmaps[gtype][ty] = len(idmaps[gtype])
@@ -459,12 +470,11 @@ def token_mapping(input_folder, output_dir, freq_mode=True):
     if len(not_cached_graph_types) != 0:
         # Collect opc stats info
         for f_json in tqdm(os.listdir(input_folder), desc="Token Mapping"):
-            if not f_json.endswith(".json"):
+            if not is_feature_file(f_json):
                 continue
 
             json_path = os.path.join(input_folder, f_json)
-            with open(json_path) as f_in:
-                jj = json.load(f_in)
+            jj = load_feature_json(json_path)
 
             arch = f_json.split('-')[0][:-2]
             idb_path = list(jj.keys())[0]
@@ -514,10 +524,8 @@ def token_mapping(input_folder, output_dir, freq_mode=True):
         for ty, opc_cnt in opc_cnts.items():
             if ty.endswith("_occur"):
                 continue
-            if not isinstance(opc_cnt, dict):
-                opc_cnt = [(k,v) for k,v in opc_cnt.most_common()]
-            else:
-                opc_cnt = sorted(list(opc_cnt.items()), key=lambda k:k[1], reverse=True)
+            # Ties by token so the vocabulary does not depend on file / worker completion order.
+            opc_cnt = sorted(opc_cnt.items(), key=lambda kv: (-kv[1], kv[0]))
             mapped_cnt = 0
             tot_cnt = sum([v for _, v in opc_cnt])
             idmaps[gtype][ty] = len(idmaps[gtype])
@@ -636,8 +644,7 @@ def coo_tuple_to_str(graph_tuple):
 
 def process_one_file(args):
     json_path, opc_dicts, dump_str, dump_pkl = args
-    with open(json_path) as f_in:
-        jj = json.load(f_in)
+    jj = load_feature_json(json_path)
     f_json = os.path.basename(json_path)
     arch = f_json.split('-')[0][:-2]
     idb_path = list(jj.keys())[0]
@@ -714,7 +721,7 @@ def create_function_shards_parallel(input_folder, output_dir, dataset, freq_mode
     }
     args = []
     for shard_idx, f_json in enumerate(sorted(os.listdir(input_folder))):
-        if not f_json.endswith(".json"):
+        if not is_feature_file(f_json):
             continue
         json_path = os.path.join(input_folder, f_json)
         args.append((shard_idx, json_path, opc_dicts, dump_str, dump_pkl, shard_dirs))
